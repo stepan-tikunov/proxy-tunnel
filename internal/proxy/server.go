@@ -144,13 +144,13 @@ func (s *Server) handleClientConn(ctx context.Context, conn net.Conn) {
 			p, err := payload.Read(conn)
 			if err != nil {
 				s.log.Error("could not read response data", slog.Any("error", err))
-				return
+				continue
 			}
 
 			pubConn, ok := s.publicConns[p.ID]
 			if !ok {
 				s.log.Error("could not forward response data, public client's socket not found")
-				return
+				continue
 			}
 
 			s.publicMu.Lock()
