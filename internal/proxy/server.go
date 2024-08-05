@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -143,6 +145,11 @@ func (s *Server) handleClientConn(ctx context.Context, conn net.Conn) {
 		default:
 			p, err := payload.Read(conn)
 			if err != nil {
+				if errors.Is(err, io.EOF) {
+					s.log.Error("lost connection to client", slog.Any("error", err))
+					return
+				}
+
 				s.log.Error("could not read response data", slog.Any("error", err))
 				continue
 			}
