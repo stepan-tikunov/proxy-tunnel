@@ -61,10 +61,7 @@ func (c *Client) forwardRequest(ctx context.Context, req payload.Payload, respCo
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	deadline := time.Now().Add(c.cfg.Timeout)
-
 	if conn, ok := c.conns[req.ID]; ok {
-		_ = conn.SetReadDeadline(deadline)
 		_, err := conn.Write(req.Data)
 		return err
 	}
@@ -76,13 +73,21 @@ func (c *Client) forwardRequest(ctx context.Context, req payload.Payload, respCo
 
 	c.conns[req.ID] = conn
 
-	_ = conn.SetReadDeadline(deadline)
-	_ = conn.SetWriteDeadline(deadline)
+	c.log.Debug("sending request data",
+		slog.String("id", req.ID.String()),
+		slog.Int("length", len(req.Data)),
+		slog.String("data", string(req.Data)),
+	)
 
 	_, err = conn.Write(req.Data)
+	_ = conn.SetDeadline(time.Now().Add(c.cfg.Timeout))
 	if err != nil {
 		return err
 	}
+	c.log.Debug("sent request data",
+		slog.String("id", req.ID.String()),
+		slog.Int("length", len(req.Data)),
+	)
 
 	go func() {
 		for {
@@ -91,13 +96,27 @@ func (c *Client) forwardRequest(ctx context.Context, req payload.Payload, respCo
 				return
 			default:
 				buf := make([]byte, payload.MaxDataSize)
+				c.log.Debug("reading response data",
+					slog.String("id", req.ID.String()),
+				)
 				n, err := conn.Read(buf)
+
 				if err != nil {
-					c.log.Error("could not read response data", slog.Any("error", err))
-					return
+					if payload.IsTimeout(err) {
+						n = 0
+						conn.Close()
+					} else {
+						c.log.Error("could not read response data", slog.Any("error", err))
+						return
+					}
 				}
 
 				p := payload.New(req.ID, buf[:n])
+				c.log.Debug("finished reading response data",
+					slog.String("id", req.ID.String()),
+					slog.Int("length", len(p.Data)),
+					slog.String("data", string(p.Data)),
+				)
 				if _, err := respConn.Write(p.Bytes()); err != nil {
 					c.log.Error("could not send response data", slog.Any("error", err))
 					return
@@ -110,7 +129,7 @@ func (c *Client) forwardRequest(ctx context.Context, req payload.Payload, respCo
 }
 
 func (c *Client) requestsChan(ctx context.Context, conn net.Conn) chan payload.Payload {
-	res := make(chan payload.Payload)
+	res := make(chan payload.Payload, 100)
 
 	go func() {
 		defer close(res)
@@ -120,12 +139,11 @@ func (c *Client) requestsChan(ctx context.Context, conn net.Conn) chan payload.P
 			case <-ctx.Done():
 				return
 			default:
-				_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+				_ = conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 				p, err := payload.Read(conn)
 
-				var netErr net.Error
 				if err != nil {
-					if errors.As(err, &netErr) && netErr.Timeout() {
+					if payload.IsTimeout(err) {
 						continue
 					}
 
@@ -137,6 +155,12 @@ func (c *Client) requestsChan(ctx context.Context, conn net.Conn) chan payload.P
 					c.log.Error("could not read request data", slog.Any("error", err))
 					return
 				}
+
+				c.log.Debug("received request data",
+					slog.String("id", p.ID.String()),
+					slog.Int("length", len(p.Data)),
+					slog.String("data", string(p.Data)),
+				)
 
 				res <- *p
 			}

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/stepan-tikunov/proxy-tunnel/internal/config"
 	"github.com/stepan-tikunov/proxy-tunnel/internal/payload"
@@ -35,7 +36,7 @@ func listenTCPConnections(address string) (chan net.Conn, error) {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 
-	res := make(chan net.Conn)
+	res := make(chan net.Conn, 100)
 
 	go func() {
 		for {
@@ -104,7 +105,7 @@ func (s *Server) handlePublicConn(ctx context.Context, conn net.Conn) {
 		case <-ctx.Done():
 			return
 		default:
-			buf := make([]byte, payload.MaxPayloadSize)
+			buf := make([]byte, payload.MaxDataSize)
 			n, err := conn.Read(buf)
 			if err != nil {
 				s.log.Info("connection dropped",
@@ -120,11 +121,22 @@ func (s *Server) handlePublicConn(ctx context.Context, conn net.Conn) {
 			}
 
 			p := payload.New(id, buf[:n])
+			s.log.Debug("read request data",
+				slog.String("id", p.ID.String()),
+				slog.Int("length", len(p.Data)),
+				slog.String("data", string(p.Data)),
+			)
 
+			s.log.Debug("sending request data",
+				slog.String("id", p.ID.String()),
+			)
 			if _, err = s.clientConn.Write(p.Bytes()); err != nil {
 				s.log.Error("could not send data to client", slog.Any("error", err))
 				return
 			}
+			s.log.Debug("sent request data",
+				slog.String("id", p.ID.String()),
+			)
 		}
 	}
 }
@@ -143,6 +155,7 @@ func (s *Server) handleClientConn(ctx context.Context, conn net.Conn) {
 		case <-ctx.Done():
 			return
 		default:
+			_ = conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 			p, err := payload.Read(conn)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
@@ -150,9 +163,17 @@ func (s *Server) handleClientConn(ctx context.Context, conn net.Conn) {
 					return
 				}
 
-				s.log.Error("could not read response data", slog.Any("error", err))
+				if !payload.IsTimeout(err) {
+					s.log.Error("could not read response data", slog.Any("error", err))
+				}
+
 				continue
 			}
+			s.log.Debug("read response data",
+				slog.String("id", p.ID.String()),
+				slog.Int("length", len(p.Data)),
+				slog.String("data", string(p.Data)),
+			)
 
 			pubConn, ok := s.publicConns[p.ID]
 			if !ok {
@@ -160,14 +181,26 @@ func (s *Server) handleClientConn(ctx context.Context, conn net.Conn) {
 				continue
 			}
 
-			s.publicMu.Lock()
-
-			_, err = pubConn.Write(p.Data)
-			if err != nil {
-				s.log.Error("could not forward response data", slog.Any("error", err))
+			if len(p.Data) == 0 {
+				pubConn.Close()
+				continue
 			}
 
+			s.log.Debug("sending response data",
+				slog.String("id", p.ID.String()),
+			)
+
+			s.publicMu.Lock()
+			_, err = pubConn.Write(p.Data)
 			s.publicMu.Unlock()
+
+			if err != nil {
+				s.log.Error("could not forward response data", slog.Any("error", err))
+				return
+			}
+			s.log.Debug("sent response data",
+				slog.String("id", p.ID.String()),
+			)
 		}
 	}
 }

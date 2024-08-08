@@ -12,8 +12,11 @@ import (
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	cfg := config.MustLoad[config.Server]()
+	log := slog.New(slog.NewJSONHandler(
+		os.Stdout,
+		&slog.HandlerOptions{Level: cfg.Env.LogLevel()},
+	))
 
 	ctx, cancel := context.WithCancel(context.Background())
 

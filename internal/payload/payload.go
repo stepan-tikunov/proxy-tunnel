@@ -3,9 +3,11 @@ package payload
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 
 	"github.com/google/uuid"
 )
@@ -61,11 +63,27 @@ func Read(r io.Reader) (*Payload, error) {
 		return nil, fmt.Errorf("%s: could not parse payload ID: %w", op, err)
 	}
 
+	var data bytes.Buffer
+
 	scanner := bufio.NewScanner(r)
 	scanner.Split(splitUntilDelimiter(id[:]))
-	if !scanner.Scan() {
-		return nil, fmt.Errorf("%s: could not read payload data: not found delimiter", op)
+	for scanner.Scan() {
+		chunk := scanner.Bytes()
+		if len(chunk) == 0 {
+			break
+		}
+
+		data.Write(chunk)
+
+		if !scanner.Scan() {
+			break
+		}
 	}
 
-	return &Payload{ID: id, Data: scanner.Bytes()}, nil
+	return &Payload{ID: id, Data: data.Bytes()}, nil
+}
+
+func IsTimeout(err error) bool {
+	var e net.Error
+	return errors.As(err, &e) && e.Timeout()
 }
